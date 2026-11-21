@@ -1,0 +1,26 @@
+name: CI
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build
+      # Unit, proxy, HTTP, CLI, and attack-lab tests. Scripted agent, no API key, no network.
+      - run: npm test
+      - name: Attack lab through real stdio processes (exits non-zero if any attack gets through)
+        run: node dist/cli.js lab --mode process --ablation

@@ -1,0 +1,53 @@
+{
+  "name": "mcp-airlock",
+  "version": "0.1.0",
+  "description": "A runtime firewall for MCP: pins tool definitions, strips hidden text, and blocks tool calls that carry content from untrusted sources.",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "airlock": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.12"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "airlock": "tsx src/cli.ts",
+    "lab": "tsx src/cli.ts lab",
+    "test": "tsx --test tests/*.test.ts"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "security",
+    "prompt-injection",
+    "ai-agent",
+    "claude",
+    "firewall",
+    "proxy"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/client": "2.4.0",
+    "@modelcontextprotocol/server": "2.4.0",
+    "commander": "^15.1.0",
+    "diff": "^9.0.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/trailofblocks/mcp-airlock.git"
+  },
+  "homepage": "https://github.com/trailofblocks/mcp-airlock#readme"
+}

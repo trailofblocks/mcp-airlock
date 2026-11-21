@@ -1,0 +1,32 @@
+{
+  "default": "allow",
+  "rules": [
+    { "server": "*", "tool": "delete_*", "action": "ask", "note": "destructive tools always need a yes" },
+    { "server": "github", "tool": "merge_pull_request", "action": "ask" }
+  ],
+  "pinning": { "enabled": true, "onNew": "pin" },
+  "hiddenText": { "enabled": true, "toolMetadata": "block", "toolResults": "strip" },
+  "taint": {
+    "enabled": true,
+    "sources": [
+      { "server": "github", "tool": "*", "label": "untrusted" },
+      { "server": "fetch", "tool": "*", "label": "untrusted" },
+      { "server": "email", "tool": "*", "label": "untrusted" },
+      { "server": "filesystem", "tool": "read*", "label": "private", "indicators": false }
+    ],
+    "sinks": [
+      { "server": "*", "tool": "*shell*", "action": "ask", "checks": { "untrusted": ["command", "cmd", "script"] } },
+      { "server": "*", "tool": "*exec*", "action": "ask", "checks": { "untrusted": ["*"] } },
+      { "server": "filesystem", "tool": "write_file", "action": "ask", "checks": { "untrusted": ["path"] } },
+      { "server": "filesystem", "tool": "edit_file", "action": "ask", "checks": { "untrusted": ["path"] } },
+      { "server": "github", "tool": "push_files", "action": "ask", "checks": { "untrusted": ["owner", "repo"], "private": ["files"] } },
+      { "server": "github", "tool": "create_*", "action": "ask", "checks": { "private": ["*"] } },
+      { "server": "fetch", "tool": "*", "action": "deny", "checks": { "private": ["*"] } },
+      { "server": "email", "tool": "send*", "action": "ask", "checks": { "untrusted": ["to", "cc", "bcc"], "private": ["*"] } }
+    ],
+    "ignoreHosts": ["github.com"],
+    "minMatch": 20,
+    "ttlHours": 24
+  },
+  "approvals": { "elicitation": true, "timeoutSeconds": 300, "ttlMinutes": 15 }
+}
