@@ -91,7 +91,7 @@ Airlock assumes the model will follow any instruction it reads. The attack lab's
 | Which tool the agent calls, and with what arguments | The model, so possibly the attacker |
 | Whether a held call goes through | You, in the client's approval prompt or an interactive terminal |
 
-- **The model can't approve its own call.** When the client supports MCP elicitation, Airlock asks in the client's own UI. Otherwise it holds the call and prints an approval id, and `airlock approve <id>` only works from an interactive terminal where you type the id back. An approval is good for one identical call (same server, tool, and arguments) for 15 minutes.
+- **The model can't approve its own call.** If the client connects with `initialize` and supports MCP elicitation, Airlock asks in the client's own UI. Otherwise, Airlock holds the call and prints an approval id, and `airlock approve <id>` only works from an interactive terminal where you type the id back. Clients on protocol revision 2026-07-28, including Claude Code, currently get the approval id, because Airlock doesn't yet ask for input the way that revision does. An approval is good for one identical call (same server, tool, and arguments) for 15 minutes.
 - **Changed tools disappear before anyone reads them.** Every listing is checked against the pins, and every call is checked against the latest listing. If the client calls a tool before listing, or after the server sent `list_changed` and the client didn't re-list, Airlock lists the tools itself first.
 - **Unknown tools are blocked.** A call to a tool the server didn't list is refused.
 - **Airlock is not a sandbox.** The wrapped server runs as you, with the environment your MCP client gave Airlock, exactly as it would without Airlock. An agent with its own shell can edit `~/.airlock`. Airlock guards the MCP channel, not the machine.
@@ -137,7 +137,7 @@ airlock inspect --name github -- npx -y @modelcontextprotocol/server-github     
 airlock inspect --name github --approve -- npx -y @modelcontextprotocol/server-github # pin
 ```
 
-Airlock has been tested end to end with the official MCP TypeScript SDK client, over stdio and Streamable HTTP. It has not been tested inside Claude Code or Cursor yet.
+Airlock has been tested end to end with the official MCP TypeScript SDK client, over stdio and Streamable HTTP. With Claude Code 2.1.330, `claude mcp list` connects through Airlock over protocol revision 2026-07-28, and Airlock filters the tool list Claude Code receives: the poisoned lab tool is hidden and the rest are pinned. A full Claude Code chat session through Airlock hasn't been verified yet, and Cursor hasn't been tried.
 
 ## Evaluation
 
@@ -193,7 +193,7 @@ These are regression tests against a lab built alongside the tool, not a benchma
 | `taint.ignoreHosts` | `[]` | Hosts (and subdomains) that never count as tainted, such as your code host |
 | `taint.minMatch` | `20` | Shortest shared run of characters that counts as taint |
 | `taint.ttlHours` | `24` | How long fingerprints stay live |
-| `approvals.elicitation` | `true` | Ask in the client's UI when it supports MCP elicitation |
+| `approvals.elicitation` | `true` | Ask in the client's UI when it connects with `initialize` and supports MCP elicitation |
 | `approvals.ttlMinutes` | `15` | How long an `airlock approve` stays usable |
 
 Run `airlock policy <file>` to validate a policy file and print it with defaults filled in.
@@ -227,12 +227,13 @@ The proxy tests connect the SDK's client and server through Airlock in memory. T
 - **Pinning trusts first use.** A tool that is malicious from the start is pinned as-is, unless it carries hidden characters. Read it with `inspect`, or set `pinning.onNew` to `block`. Pinning also can't see a server change what a tool *does* while keeping its definition the same.
 - **Tools only.** Resources, prompts, sampling, and elicitation requests from servers pass through without inspection.
 - **The interruptions are real.** Expect a prompt when you deliberately reuse text from an untrusted source in a sink argument (B3), and after every tool update (B10).
-- **Approval prompts:** The elicitation path is verified with the SDK's client, not yet in Claude Code or Cursor. Requiring a terminal for `airlock approve` is a speed bump against an agent with a shell, not a security boundary.
+- **Approval prompts:** In-client prompts work only for clients that connect with `initialize`, and they are verified with the SDK's client only. Claude Code uses revision 2026-07-28, so it gets an `airlock approve` id instead. Requiring a terminal for `airlock approve` is a speed bump against an agent with a shell, not a security boundary.
 - **State is plain files.** Taint and audit records are appended to JSONL and are never compacted. Old taint records stop counting after `ttlHours`. The Streamable HTTP upstream is tested against the SDK's handler with a 2025-revision client only.
 
 ## Roadmap
 
 - A Claude Code `PreToolUse` hook that checks built-in tool inputs (Bash, Edit, WebFetch) against the same taint store
+- In-client approval prompts for 2026-07-28 clients such as Claude Code, using that revision's `input_required` results
 - Inspection of resources and prompts
 - An HTTP front end, so remote clients can use Airlock as a gateway
 - Team-shared, signed pin files
