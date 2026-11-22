@@ -358,7 +358,8 @@ program
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
-  return Buffer.concat(chunks).toString("utf8");
+  // Windows PowerShell puts a byte-order mark in front of what it pipes to a native command.
+  return Buffer.concat(chunks).toString("utf8").replace(/^﻿/, "");
 }
 
 program

@@ -180,6 +180,11 @@ describe("hook: the airlock hook command", () => {
     const clean = airlock(["hook", "--state-dir", stateDir, "--session", "s1"], JSON.stringify(fixture("bash-npm-test.json")));
     assert.equal(clean.code, 0);
     assert.equal(clean.stdout, "");
+
+    // Piped from Windows PowerShell, the input starts with a byte-order mark.
+    const bom = airlock(["hook", "--state-dir", stateDir, "--session", "s1"], `﻿${JSON.stringify(fixture("bash-injected.json"))}\r\n`);
+    assert.equal(bom.code, 0, bom.stderr);
+    assert.equal(JSON.parse(bom.stdout).hookSpecificOutput.permissionDecision, "ask");
   });
 
   it("exits 2, which blocks the call, when it can't decide", () => {
