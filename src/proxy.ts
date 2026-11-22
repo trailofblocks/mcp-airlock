@@ -77,7 +77,7 @@ interface RoundState {
 }
 
 /** What a retried call carried back of Airlock's own state. */
-type Resume = { kind: "continue" } | { kind: "approval"; accepted: boolean };
+type Resume = { kind: "continue" } | { kind: "approval"; answer: unknown };
 
 const key = (id: Id) => `${typeof id}:${id}`;
 const PROTOCOL_VERSION_META = "io.modelcontextprotocol/protocolVersion";
@@ -110,6 +110,14 @@ const APPROVAL_SCHEMA = {
 
 function approvedAnswer(answer: unknown): boolean {
   return isRecord(answer) && answer.action === "accept" && isRecord(answer.content) && answer.content.approve === true;
+}
+
+/** What came back for Airlock's approval form, in words, for the block message and the audit log. */
+function describeAnswer(answer: unknown): { answer: string; text: string } {
+  if (!isRecord(answer)) return { answer: "missing", text: "The client retried the call without an answer to the approval form." };
+  if (answer.action === "decline") return { answer: "decline", text: "The user declined this call." };
+  if (answer.action === "cancel") return { answer: "cancel", text: "The approval form was cancelled, so this call wasn't approved." };
+  return { answer: String(answer.action), text: "The approval form came back without a yes." };
 }
 
 /** Every piece of text a model reads from a tool result. */
@@ -313,8 +321,12 @@ export class Airlock {
       };
       if (resume?.kind === "continue") return approved("approved earlier; the server asked for more input");
       if (resume?.kind === "approval") {
-        if (resume.accepted) return approved("approved in client (input_required)");
-        return this.deny(msg, call, `${why}\nThe user declined this call.`, details());
+        if (approvedAnswer(resume.answer)) return approved("approved in client (input_required)");
+        // Record exactly what came back: a client may answer the form without showing it to anyone.
+        const { answer, text } = describeAnswer(resume.answer);
+        if (answer === "decline") return this.deny(msg, call, `${why}\n${text}`, { ...details(), answer });
+        // Anything short of a no may mean the client couldn't show the form, so leave a way through.
+        return this.holdForApproval(msg, call, `${why}\n${text}`, { ...details(), answer });
       }
       const used = this.approvals.consume(server, name, call.argsHash);
       if (used) return approved(`approved out of band (${used.id})`);
@@ -329,18 +341,23 @@ export class Airlock {
       if (policy.approvals.elicitation && isModern(meta) && isRecord(meta) && supportsFormElicitation(meta[CLIENT_CAPABILITIES_META])) {
         return this.askInputRequired(msg, call, prompt, why, details());
       }
-      const req = this.approvals.request({
-        server,
-        tool: name,
-        argsHash: call.argsHash,
-        argsPreview: truncate(JSON.stringify(args), 600),
-        reason: why,
-      });
-      return this.deny(msg, call, why, { ...details(), approvalId: req.id }, req.id);
+      return this.holdForApproval(msg, call, why, details());
     }
 
     this.audit.write({ type: "call_allowed", tool: name, argsHash: call.argsHash });
     this.forwardCall(msg, call);
+  }
+
+  /** Block the call and file an approval id the user can approve from a terminal. */
+  private holdForApproval(msg: Msg, call: CallInfo, why: string, details: Record<string, unknown>): void {
+    const req = this.approvals.request({
+      server: this.opts.server,
+      tool: call.tool,
+      argsHash: call.argsHash,
+      argsPreview: truncate(JSON.stringify(call.args), 600),
+      reason: why,
+    });
+    this.deny(msg, call, why, { ...details, approvalId: req.id }, req.id);
   }
 
   private forwardCall(msg: Msg, call: CallInfo, approved = false): void {
@@ -389,7 +406,7 @@ export class Airlock {
       this.notice(`ignored ${state ? "a mismatched or expired" : "an unknown"} approval state on a call to ${call.tool}`);
       return { params: next };
     }
-    return { params: next, resume: { kind: "approval", accepted: approvedAnswer(answer) } };
+    return { params: next, resume: { kind: "approval", answer } };
   }
 
   private askInputRequired(msg: Msg, call: CallInfo, prompt: string, why: string, details: Record<string, unknown>): void {

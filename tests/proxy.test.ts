@@ -574,19 +574,56 @@ describe("proxy: in-client approval for 2026-07-28 clients (input_required)", ()
     await env.close();
   });
 
-  it("honors an approval only for the call it was asked about, and only once", async () => {
-    const env = await setup();
-    // A raw client, so the test controls exactly what each retry carries.
+  /** A raw 2026-07-28 client, so a test controls exactly what each retry carries. */
+  async function rawClient(clientSide: Transport) {
     const pending = new Map<number, (m: Record<string, unknown>) => void>();
-    env.clientSide.onmessage = (m) => pending.get((m as { id: number }).id)?.(m as Record<string, unknown>);
-    await env.clientSide.start();
+    clientSide.onmessage = (m) => pending.get((m as { id: number }).id)?.(m as Record<string, unknown>);
+    await clientSide.start();
     let seq = 0;
-    const request = (params: Record<string, unknown>) =>
+    return (params: Record<string, unknown>) =>
       new Promise<Record<string, unknown>>((resolve) => {
         const id = ++seq;
         pending.set(id, (m) => resolve(m.result as Record<string, unknown>));
-        void env.clientSide.send({ jsonrpc: "2.0", id, method: "tools/call", params: { _meta: META, ...params } });
+        void clientSide.send({ jsonrpc: "2.0", id, method: "tools/call", params: { _meta: META, ...params } });
       });
+  }
+
+  it("says what came back when the form isn't answered with a yes", async () => {
+    const env = await setup();
+    const request = await rawClient(env.clientSide);
+    const text = (r: Record<string, unknown>) => (r.content as Array<{ text: string }>)[0]!.text;
+
+    const first = await request({ name: "run", arguments: { command: CMD } });
+    const cancelled = await request({
+      name: "run",
+      arguments: { command: CMD },
+      inputResponses: { airlock_approval: { action: "cancel" } },
+      requestState: first.requestState,
+    });
+    assert.equal(cancelled.isError, true);
+    // Short of a no, the client may not have been able to show the form: block, but leave an approval id.
+    assert.match(text(cancelled), /The approval form was cancelled, so this call wasn't approved\.\n\nTo allow it once, run in a terminal:\n {2}airlock approve [0-9a-f]{8}/);
+
+    const second = await request({ name: "run", arguments: { command: CMD } });
+    const unanswered = await request({ name: "run", arguments: { command: CMD }, requestState: second.requestState });
+    assert.match(text(unanswered), /The client retried the call without an answer to the approval form\.\n\nTo allow it once/);
+
+    const third = await request({ name: "run", arguments: { command: CMD } });
+    const no = { airlock_approval: { action: "decline" } };
+    const declined = await request({ name: "run", arguments: { command: CMD }, inputResponses: no, requestState: third.requestState });
+    assert.match(text(declined), /The user declined this call\.$/, "a no gets no approval id");
+
+    assert.deepEqual(
+      env.audit().filter((e) => e.type === "call_denied").map((e) => [e.details?.answer, typeof e.details?.pendingApproval]),
+      [["cancel", "string"], ["missing", "string"], ["decline", "undefined"]],
+    );
+    assert.deepEqual(env.legs, []);
+    await env.close();
+  });
+
+  it("honors an approval only for the call it was asked about, and only once", async () => {
+    const env = await setup();
+    const request = await rawClient(env.clientSide);
     const yes = { airlock_approval: { action: "accept", content: { approve: true } } };
 
     const first = await request({ name: "run", arguments: { command: CMD } });

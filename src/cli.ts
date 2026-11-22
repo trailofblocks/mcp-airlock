@@ -305,6 +305,7 @@ function formatEvent(e: AuditEvent): string {
   const taint = e.details?.taint;
   if (Array.isArray(taint)) for (const t of taint) lines.push(`    - ${(t as { explained: string }).explained}`);
   if (typeof e.details?.pendingApproval === "string") lines.push(`    approve with: airlock approve ${e.details.pendingApproval}`);
+  if (typeof e.details?.answer === "string") lines.push(`    approval form answer: ${e.details.answer}`);
   return lines.join("\n");
 }
 
