@@ -9,6 +9,8 @@ export type AuditType =
   | "call_allowed"
   | "call_denied"
   | "call_approved"
+  /** Handed to the user's prompt in the client: an `input_required` form, or Claude Code's permission prompt. */
+  | "call_asked"
   | "result_stripped"
   | "result_blocked"
   | "hidden_text_warning"

@@ -72,6 +72,7 @@ export function interventions(audit: AuditEvent[]): string[] {
   const out: string[] = [];
   for (const e of audit) {
     if (e.type === "call_denied") out.push(e.details?.pendingApproval ? `held ${e.tool} for approval` : `blocked ${e.tool}`);
+    if (e.type === "call_asked") out.push(`held ${e.tool} for approval`);
     if (e.type === "tool_hidden") out.push(`hid ${e.tool}`);
     if (e.type === "result_stripped") out.push(`stripped ${e.tool} result`);
     if (e.type === "result_blocked") out.push(`blocked ${e.tool} result`);

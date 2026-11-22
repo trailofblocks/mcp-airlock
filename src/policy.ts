@@ -28,6 +28,33 @@ const SinkSchema = z.strictObject({
   checks: z.record(z.string().min(1), z.array(z.string().min(1)).min(1)).default({ untrusted: ["*"] }),
 });
 
+const HookSinkSchema = z.strictObject({
+  /** Claude Code tool name (glob), as it appears in the hook input's `tool_name`. */
+  tool: z.string().min(1),
+  action: z.enum(["ask", "deny"]).default("ask"),
+  /** Label -> top-level `tool_input` field names (globs) that must not carry content with that label. */
+  checks: z.record(z.string().min(1), z.array(z.string().min(1)).min(1)).default({ untrusted: ["*"] }),
+});
+
+type HookSink = z.infer<typeof HookSinkSchema>;
+
+/**
+ * Claude Code's built-in tools that run, write, or send something, and the input fields that matter.
+ * Field names follow the PreToolUse input documented at code.claude.com/docs/en/hooks.
+ */
+export const DEFAULT_HOOK_SINKS: readonly HookSink[] = [
+  { tool: "Bash", action: "ask", checks: { untrusted: ["command"], private: ["command"] } },
+  { tool: "PowerShell", action: "ask", checks: { untrusted: ["command"], private: ["command"] } },
+  { tool: "Write", action: "ask", checks: { untrusted: ["file_path"] } },
+  { tool: "Edit", action: "ask", checks: { untrusted: ["file_path"] } },
+  { tool: "NotebookEdit", action: "ask", checks: { untrusted: ["notebook_path"] } },
+  { tool: "WebFetch", action: "ask", checks: { untrusted: ["url"] } },
+  { tool: "WebFetch", action: "deny", checks: { private: ["url"] } },
+  { tool: "WebSearch", action: "deny", checks: { private: ["query"] } },
+];
+
+const defaultHookSinks = (): HookSink[] => DEFAULT_HOOK_SINKS.map((s) => ({ ...s, checks: structuredClone(s.checks) }));
+
 export const PolicySchema = z.strictObject({
   $schema: z.string().optional(),
   /** Action for tool calls no rule matches. */
@@ -73,11 +100,21 @@ export const PolicySchema = z.strictObject({
       ttlMinutes: z.number().positive().default(15),
     })
     .default({ elicitation: true, timeoutSeconds: 300, ttlMinutes: 15 }),
+  /** `airlock hook`: taint checks for Claude Code's built-in tools, which never pass through MCP. */
+  hook: z
+    .strictObject({
+      /** The name the hook's decisions are logged under in the audit log. */
+      server: z.string().min(1).default("claude-code"),
+      /** Which built-in tools to check, and which input fields. Setting this replaces the defaults. */
+      sinks: z.array(HookSinkSchema).default(defaultHookSinks),
+    })
+    .default(() => ({ server: "claude-code", sinks: defaultHookSinks() })),
 });
 
 export type Policy = z.infer<typeof PolicySchema>;
 export type Sink = Policy["taint"]["sinks"][number];
 export type Source = Policy["taint"]["sources"][number];
+export type { HookSink };
 
 export class PolicyError extends Error {}
 
@@ -124,6 +161,12 @@ export function sourcesFor(policy: Policy, server: string, tool: string): Source
 export function sinksFor(policy: Policy, server: string, tool: string): Sink[] {
   if (!policy.taint.enabled) return [];
   return policy.taint.sinks.filter((s) => matchGlob(s.server, server) && matchGlob(s.tool, tool));
+}
+
+/** Hook sinks for one Claude Code tool. */
+export function hookSinksFor(policy: Policy, tool: string): HookSink[] {
+  if (!policy.taint.enabled) return [];
+  return policy.hook.sinks.filter((s) => matchGlob(s.tool, tool));
 }
 
 const SEVERITY: Record<Action, number> = { allow: 0, ask: 1, deny: 2 };

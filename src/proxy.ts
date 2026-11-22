@@ -3,10 +3,11 @@ import path from "node:path";
 import type { JSONRPCMessage, Transport } from "@modelcontextprotocol/server";
 import { ApprovalStore } from "./approvals.js";
 import { AuditLog } from "./audit.js";
+import { checkSinks, describeHit, explain } from "./check.js";
 import { revealHidden, scanHiddenJson, stripHiddenJson, summarizeRuns } from "./hidden.js";
 import { snapshotTool, toolHash, PinStore } from "./pins.js";
 import { type Action, decideRule, type Policy, sinksFor, sourcesFor, strictest } from "./policy.js";
-import { TaintStore, type TaintHit } from "./taint.js";
+import { TaintStore } from "./taint.js";
 import { canonicalJson, isRecord, sha256, stringLeaves, truncate } from "./util/json.js";
 
 export interface AirlockOptions {
@@ -51,6 +52,8 @@ interface Forwarded {
   method: string;
   params: Record<string, unknown>;
   call?: CallInfo;
+  /** The user approved this call (a held `ask`), so later input rounds the server starts stay approved. */
+  approved?: boolean;
 }
 
 export interface ToolVerdict {
@@ -58,8 +61,30 @@ export interface ToolVerdict {
   reason?: string;
 }
 
+/**
+ * State Airlock keeps for a multi-round-trip `tools/call` (protocol revision 2026-07-28). The client
+ * echoes the token back as `requestState`, so it never leaves this process: the token is random and
+ * single-use, and everything it stands for stays here.
+ */
+interface RoundState {
+  /** `approval`: Airlock asked the user. `continue`: an approved call the server asked more of. */
+  kind: "approval" | "continue";
+  tool: string;
+  argsHash: string;
+  expires: number;
+  /** For `continue`: the server's own `requestState`, restored before the retry is forwarded. */
+  serverState?: string;
+}
+
+/** What a retried call carried back of Airlock's own state. */
+type Resume = { kind: "continue" } | { kind: "approval"; accepted: boolean };
+
 const key = (id: Id) => `${typeof id}:${id}`;
 const PROTOCOL_VERSION_META = "io.modelcontextprotocol/protocolVersion";
+const CLIENT_CAPABILITIES_META = "io.modelcontextprotocol/clientCapabilities";
+/** Key of Airlock's approval form in an `input_required` result's `inputRequests`. */
+export const APPROVAL_INPUT_KEY = "airlock_approval";
+const STATE_PREFIX = "airlock.v1.";
 const isRequest = (m: Msg) => typeof m.method === "string" && m.id !== undefined;
 const isNotification = (m: Msg) => typeof m.method === "string" && m.id === undefined;
 const isResponse = (m: Msg) => m.method === undefined && m.id !== undefined;
@@ -68,6 +93,23 @@ function supportsFormElicitation(capabilities: unknown): boolean {
   if (!isRecord(capabilities) || !isRecord(capabilities.elicitation)) return false;
   const e = capabilities.elicitation;
   return Object.keys(e).length === 0 || isRecord(e.form);
+}
+
+/** A request from a client speaking revision 2026-07-28 or later carries its version in `_meta`. */
+function isModern(meta: unknown): boolean {
+  return isRecord(meta) && meta[PROTOCOL_VERSION_META] !== undefined;
+}
+
+const APPROVAL_SCHEMA = {
+  type: "object",
+  properties: {
+    approve: { type: "boolean", title: "Allow this call", description: "Airlock will forward it to the server once.", default: false },
+  },
+  required: ["approve"],
+} as const;
+
+function approvedAnswer(answer: unknown): boolean {
+  return isRecord(answer) && answer.action === "accept" && isRecord(answer.content) && answer.content.approve === true;
 }
 
 /** Every piece of text a model reads from a tool result. */
@@ -100,22 +142,7 @@ function changedFields(before: Record<string, unknown>, after: Record<string, un
   );
 }
 
-function clock(ts: number): string {
-  return new Date(ts).toISOString().slice(11, 19);
-}
-
-export function describeHit(hit: TaintHit): string {
-  const src = `${hit.source.server}/${hit.source.tool} (${hit.label}, ${clock(hit.source.ts)} UTC)`;
-  const via = hit.via ? ` after ${hit.via} decoding` : "";
-  switch (hit.kind) {
-    case "text":
-      return `"${hit.arg}" repeats text${via} returned by ${src}: ${JSON.stringify(hit.excerpt)}`;
-    case "host":
-      return `"${hit.arg}" names host ${hit.excerpt}${via}, which appeared in ${src}`;
-    case "path":
-      return `"${hit.arg}" names path ${hit.excerpt}${via}, which appeared in ${src}`;
-  }
-}
+export { describeHit };
 
 /**
  * A message-level MCP proxy. It forwards every JSON-RPC message between the client and the server
@@ -140,6 +167,7 @@ export class Airlock {
   private readonly ownToServer = new Map<string, (m: Msg) => void>();
   private readonly ownToClient = new Map<string, (m: Msg) => void>();
   private readonly taskCalls = new Map<string, CallInfo>();
+  private readonly rounds = new Map<string, RoundState>();
   private readonly tools = new Map<string, ToolVerdict>();
   private readonly announced = new Set<string>();
   private listed = false;
@@ -245,11 +273,14 @@ export class Airlock {
     this.send(this.upstream, msg);
   }
 
-  private async handleCall(msg: Msg): Promise<void> {
-    const params = msg.params ?? {};
-    const name = String(params.name ?? "");
-    const args = params.arguments ?? {};
+  private async handleCall(original: Msg): Promise<void> {
+    const name = String(original.params?.name ?? "");
+    const args = original.params?.arguments ?? {};
     const call: CallInfo = { tool: name, args, argsHash: sha256(canonicalJson({ name, args })) };
+    // A retry of a call Airlock answered with `input_required` carries Airlock's own fields; take them
+    // out here, so the server only ever sees its own.
+    const { params, resume } = this.takeRoundState(original.params ?? {}, call);
+    const msg: Msg = { ...original, params };
     const server = this.opts.server;
     const policy = this.opts.policy;
 
@@ -257,57 +288,46 @@ export class Airlock {
     if (!verdict) return this.deny(msg, call, `tool "${name}" is not in the server's tool list`);
     if (!verdict.visible) return this.deny(msg, call, verdict.reason ?? "tool is blocked");
 
-    const reasons: string[] = [];
     const rule = decideRule(policy, server, name);
+    const reasons: string[] = [];
     if (rule.action !== "allow") {
       reasons.push(rule.rule === undefined ? `policy default is "${rule.action}"` : `policy rule #${rule.rule + 1} says "${rule.action}"`);
     }
-    let action: Action = rule.action;
-
-    const sinks = sinksFor(policy, server, name);
-    const hits: TaintHit[] = [];
-    if (sinks.length > 0) {
-      for (const sink of sinks) {
-        const found = this.taint.check(args, sink.checks, policy.taint.ignoreHosts);
-        if (found.length > 0) {
-          hits.push(...found);
-          action = strictest(action, sink.action);
-        }
-      }
-      const hidden = scanHiddenJson(args);
-      if (hidden.length > 0) {
-        action = strictest(action, ...sinks.map((s) => s.action));
-        reasons.push(`arguments contain hidden characters (${summarizeRuns(hidden.flatMap((h) => h.runs))})`);
-      }
-    }
-    if (hits.length > 0) {
-      const labels = [...new Set(hits.map((h) => h.label))].join(", ");
-      reasons.push(`arguments carry ${labels} content`);
-    }
+    const sinks = checkSinks(this.taint, sinksFor(policy, server, name), args, policy.taint.ignoreHosts);
+    const hits = sinks.hits;
+    reasons.push(...sinks.reasons);
+    const action: Action = strictest(rule.action, sinks.action);
 
     const details = (): Record<string, unknown> => ({
       args: truncate(JSON.stringify(args), 400),
       ...(hits.length > 0 ? { taint: hits.map((h) => ({ ...h, explained: describeHit(h) })) } : {}),
     });
-    const why = [reasons.join("; "), ...hits.map((h) => `  - ${describeHit(h)}`)].filter(Boolean).join("\n");
+    const why = explain(reasons, hits);
 
     if (action === "deny") return this.deny(msg, call, why, details());
 
     if (action === "ask") {
-      const used = this.approvals.consume(server, name, call.argsHash);
-      if (used) {
-        this.audit.write({ type: "call_approved", tool: name, argsHash: call.argsHash, reason: `approved out of band (${used.id})`, details: details() });
-        return this.forwardCall(msg, call);
-      }
-      if (policy.approvals.elicitation && this.clientElicitation) {
-        const approved = await this.elicit(
-          `Airlock: allow ${server}/${name}?\n${why}\n\nArguments: ${truncate(JSON.stringify(args), 600)}`,
-        );
-        if (approved) {
-          this.audit.write({ type: "call_approved", tool: name, argsHash: call.argsHash, reason: "approved in client", details: details() });
-          return this.forwardCall(msg, call);
-        }
+      const approved = (reason: string) => {
+        this.audit.write({ type: "call_approved", tool: name, argsHash: call.argsHash, reason, details: details() });
+        this.forwardCall(msg, call, true);
+      };
+      if (resume?.kind === "continue") return approved("approved earlier; the server asked for more input");
+      if (resume?.kind === "approval") {
+        if (resume.accepted) return approved("approved in client (input_required)");
         return this.deny(msg, call, `${why}\nThe user declined this call.`, details());
+      }
+      const used = this.approvals.consume(server, name, call.argsHash);
+      if (used) return approved(`approved out of band (${used.id})`);
+      const prompt = `Airlock: allow ${server}/${name}?\n${why}\n\nArguments: ${truncate(JSON.stringify(args), 600)}`;
+      if (policy.approvals.elicitation && this.clientElicitation) {
+        if (await this.elicit(prompt)) return approved("approved in client");
+        return this.deny(msg, call, `${why}\nThe user declined this call.`, details());
+      }
+      // Revision 2026-07-28 has no server-to-client requests: a server asks for input by answering
+      // the call with `input_required`, and the client retries it with the answers.
+      const meta = params._meta;
+      if (policy.approvals.elicitation && isModern(meta) && isRecord(meta) && supportsFormElicitation(meta[CLIENT_CAPABILITIES_META])) {
+        return this.askInputRequired(msg, call, prompt, why, details());
       }
       const req = this.approvals.request({
         server,
@@ -323,9 +343,70 @@ export class Airlock {
     this.forwardCall(msg, call);
   }
 
-  private forwardCall(msg: Msg, call: CallInfo): void {
-    this.forwarded.set(key(msg.id!), { method: "tools/call", params: msg.params ?? {}, call });
+  private forwardCall(msg: Msg, call: CallInfo, approved = false): void {
+    this.forwarded.set(key(msg.id!), { method: "tools/call", params: msg.params ?? {}, call, ...(approved ? { approved } : {}) });
     this.send(this.upstream, msg);
+  }
+
+  // -------------------------------------------------------------------------------------------
+  // multi-round-trip approval (revision 2026-07-28)
+
+  private mintRound(state: Omit<RoundState, "expires">): string {
+    const now = Date.now();
+    for (const [token, s] of this.rounds) if (s.expires <= now) this.rounds.delete(token);
+    const token = `${STATE_PREFIX}${crypto.randomBytes(18).toString("base64url")}`;
+    this.rounds.set(token, { ...state, expires: now + this.opts.policy.approvals.timeoutSeconds * 1000 });
+    return token;
+  }
+
+  /**
+   * Split Airlock's own multi-round-trip fields off a `tools/call`. A token is good once, for the
+   * call it was minted for; anything else that looks like Airlock's is dropped and the call is
+   * judged afresh.
+   */
+  private takeRoundState(params: Record<string, unknown>, call: CallInfo): { params: Record<string, unknown>; resume?: Resume } {
+    const token = params.requestState;
+    if (typeof token !== "string" || !token.startsWith(STATE_PREFIX)) return { params };
+    const state = this.rounds.get(token);
+    this.rounds.delete(token);
+    const next: Record<string, unknown> = { ...params };
+    delete next.requestState;
+    const valid = state !== undefined && state.expires > Date.now() && state.tool === call.tool && state.argsHash === call.argsHash;
+
+    if (valid && state.kind === "continue") {
+      // The server's own round: its answers stay, and its state goes back where it was.
+      if (state.serverState !== undefined) next.requestState = state.serverState;
+      return { params: next, resume: { kind: "continue" } };
+    }
+    let answer: unknown;
+    if (isRecord(next.inputResponses) && APPROVAL_INPUT_KEY in next.inputResponses) {
+      const { [APPROVAL_INPUT_KEY]: own, ...rest } = next.inputResponses;
+      answer = own;
+      if (Object.keys(rest).length > 0) next.inputResponses = rest;
+      else delete next.inputResponses;
+    }
+    if (!valid) {
+      this.notice(`ignored ${state ? "a mismatched or expired" : "an unknown"} approval state on a call to ${call.tool}`);
+      return { params: next };
+    }
+    return { params: next, resume: { kind: "approval", accepted: approvedAnswer(answer) } };
+  }
+
+  private askInputRequired(msg: Msg, call: CallInfo, prompt: string, why: string, details: Record<string, unknown>): void {
+    const token = this.mintRound({ kind: "approval", tool: call.tool, argsHash: call.argsHash });
+    this.audit.write({ type: "call_asked", tool: call.tool, argsHash: call.argsHash, reason: why.split("\n")[0], details });
+    this.notice(`asked the user about ${call.tool}: ${why.replace(/\n/g, " ")}`);
+    this.send(this.downstream, {
+      jsonrpc: "2.0",
+      id: msg.id!,
+      result: {
+        resultType: "input_required",
+        inputRequests: {
+          [APPROVAL_INPUT_KEY]: { method: "elicitation/create", params: { mode: "form", message: prompt, requestedSchema: APPROVAL_SCHEMA } },
+        },
+        requestState: token,
+      },
+    });
   }
 
   private deny(msg: Msg, call: CallInfo, why: string, details: Record<string, unknown> = {}, approvalId?: string): void {
@@ -343,8 +424,7 @@ export class Airlock {
     this.notice(`${approvalId ? "held" : "blocked"} ${call.tool}: ${why.replace(/\n/g, " ")}`);
     // Revision 2026-07-28 requires every result to say what kind it is; a request carrying the
     // per-request protocol-version claim comes from a client speaking that revision.
-    const meta = msg.params?._meta;
-    const modern = isRecord(meta) && meta[PROTOCOL_VERSION_META] !== undefined;
+    const modern = isModern(msg.params?._meta);
     this.send(this.downstream, {
       jsonrpc: "2.0",
       id: msg.id!,
@@ -369,16 +449,7 @@ export class Airlock {
         jsonrpc: "2.0",
         id,
         method: "elicitation/create",
-        params: {
-          message,
-          requestedSchema: {
-            type: "object",
-            properties: {
-              approve: { type: "boolean", title: "Allow this call", description: "Airlock will forward it to the server once.", default: false },
-            },
-            required: ["approve"],
-          },
-        },
+        params: { message, requestedSchema: APPROVAL_SCHEMA },
       });
     });
   }
@@ -555,7 +626,20 @@ export class Airlock {
         if (req.method === "tools/list") this.processToolList(msg.result, req.params.cursor === undefined);
         if (req.method === "tools/call" && req.call) {
           const task = msg.result.task;
-          if (isRecord(task) && typeof task.taskId === "string" && !Array.isArray(msg.result.content)) {
+          if (msg.result.resultType === "input_required") {
+            // Not the call's result yet: the server wants input first, and the client will retry.
+            // If the user already approved this call, carry that approval into the retry, so they
+            // aren't asked again, by keeping the server's state here and handing out a token for it.
+            if (req.approved) {
+              const serverState = msg.result.requestState;
+              msg.result.requestState = this.mintRound({
+                kind: "continue",
+                tool: req.call.tool,
+                argsHash: req.call.argsHash,
+                ...(typeof serverState === "string" ? { serverState } : {}),
+              });
+            }
+          } else if (isRecord(task) && typeof task.taskId === "string" && !Array.isArray(msg.result.content)) {
             this.taskCalls.set(task.taskId, req.call);
           } else {
             this.processResult(req.call, msg);

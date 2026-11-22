@@ -11,6 +11,7 @@ import { diffWords } from "diff";
 import { ApprovalStore } from "./approvals.js";
 import { type AuditEvent, readAudit } from "./audit.js";
 import { revealHidden, scanHidden, scanHiddenJson, summarizeRuns } from "./hidden.js";
+import { HookInputError, runHook } from "./hook.js";
 import { formatReport, runLab, summarize } from "./lab/runner.js";
 import { PinStore, SERVER_NAME, snapshotTool, toolHash } from "./pins.js";
 import { defaultPolicy, loadPolicy, type Policy, PolicyError } from "./policy.js";
@@ -292,7 +293,12 @@ for (const verb of ["approve", "deny"] as const) {
 // -------------------------------------------------------------------------------------------- log
 
 function formatEvent(e: AuditEvent): string {
-  const color = e.type === "call_denied" || e.type === "tool_hidden" || e.type === "result_blocked" ? red : e.type.includes("stripped") ? yellow : dim;
+  const color =
+    e.type === "call_denied" || e.type === "tool_hidden" || e.type === "result_blocked"
+      ? red
+      : e.type.includes("stripped") || e.type === "call_asked"
+        ? yellow
+        : dim;
   const head = `${dim(e.ts.replace("T", " ").slice(0, 19))} ${e.server.padEnd(12)} ${color(e.type.padEnd(16))} ${e.tool ?? ""}`;
   const lines = [head];
   if (e.reason) lines.push(`    ${e.reason}`);
@@ -345,6 +351,43 @@ program
   .option("--state-dir <dir>", "", defaultStateDir())
   .action((file: string | undefined, opts: { stateDir: string }) => {
     process.stdout.write(`${JSON.stringify(resolvePolicy(file, path.resolve(opts.stateDir)), null, 2)}\n`);
+  });
+
+// -------------------------------------------------------------------------------------------- hook
+
+async function readStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+  return Buffer.concat(chunks).toString("utf8");
+}
+
+program
+  .command("hook")
+  .description("Claude Code PreToolUse hook: check a built-in tool call (Bash, Write, WebFetch, ...) against the taint store")
+  .option("-p, --policy <file>", "policy file (default: $AIRLOCK_HOME/policy.json, else built-in defaults)")
+  .option("--state-dir <dir>", "where the Airlock proxies keep taint and the audit log", defaultStateDir())
+  .option("--session <id>", "the --session your Airlock proxies use", process.env.AIRLOCK_SESSION || "default")
+  .action(async (opts: { policy?: string; stateDir: string; session: string }) => {
+    let output: string | undefined;
+    try {
+      const raw = await readStdin();
+      let input: unknown;
+      try {
+        input = JSON.parse(raw);
+      } catch {
+        throw new HookInputError("hook input is not valid JSON");
+      }
+      const stateDir = path.resolve(opts.stateDir);
+      const decision = runHook(input, { policy: resolvePolicy(opts.policy, stateDir), stateDir, session: opts.session });
+      if (decision) output = JSON.stringify(decision);
+    } catch (err) {
+      // Exit code 2 makes Claude Code block the call and show this to Claude: a broken policy should
+      // stop the tools it guards, not wave them through.
+      process.stderr.write(`Airlock's hook failed, so this call is blocked: ${(err as Error).message}\n`);
+      process.exit(2);
+    }
+    if (output) process.stdout.write(`${output}\n`);
+    process.exit(0);
   });
 
 // -------------------------------------------------------------------------------------------- lab
