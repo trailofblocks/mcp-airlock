@@ -145,7 +145,13 @@ airlock inspect --name github -- npx -y @modelcontextprotocol/server-github     
 airlock inspect --name github --approve -- npx -y @modelcontextprotocol/server-github # pin
 ```
 
-Airlock has been tested end to end with the official MCP TypeScript SDK client, over stdio and Streamable HTTP. With Claude Code 2.1.330, `claude mcp list` connects through Airlock over protocol revision 2026-07-28, and Airlock filters the tool list Claude Code receives: the poisoned lab tool is hidden and the rest are pinned. In a chat in the Claude desktop app's Code tab (Claude Code 2.1.330, default permission mode), calls went through Airlock, and taint from the lab's issue tracker held the `run_shell` call that repeated the issue's command. The approval form never appeared, though. Claude Code had declared on the call that it can show forms, but it retried 13 ms after receiving Airlock's form, without a yes, so Airlock blocked the call. Until that changes, set `approvals.elicitation` to `false` when you use the desktop app. Held calls then get an `airlock approve` id. The terminal CLI's handling of the form and `airlock hook` haven't been tried in a live session yet. Cursor hasn't been tried.
+Airlock has been tested end to end with the official MCP TypeScript SDK client, over stdio and Streamable HTTP. With Claude Code 2.1.330, `claude mcp list` connects through Airlock over protocol revision 2026-07-28, and Airlock filters the tool list Claude Code receives: the poisoned lab tool is hidden and the rest are pinned. A live chat in the Claude desktop app's Code tab (Claude Code 2.1.330, default permission mode), using the lab servers, showed the following:
+
+- **The hook works.** Claude Code ran `airlock hook` before a Bash call that repeated an issue's command, received `ask` with the taint path, and put the call to the user, who allowed it once.
+- **Taint holds MCP calls.** Taint recorded by the issue tracker's Airlock held the `run_shell` call that repeated the issue's command.
+- **The approval form never appeared.** Claude Code had declared on the call that it can show forms, but it answered Airlock's form with a decline 13 to 16 ms after receiving it, in two separate runs, without showing it to the user. Airlock blocked the call, as it should after a decline. Until that changes, set `approvals.elicitation` to `false` when you use the desktop app, and held calls get an `airlock approve` id instead.
+
+The terminal CLI hasn't been tried in a live chat, and neither has Cursor.
 
 ### Claude Code's built-in tools
 
@@ -187,7 +193,7 @@ For `ask`, Claude Code shows that reason in its permission prompt. For `deny`, C
 | `WebFetch` | `url` | private content | deny |
 | `WebSearch` | `query` | private content | deny |
 
-As with MCP sinks, hidden characters anywhere in a checked tool's input also trigger the action. MCP tools (`mcp__server__tool`) aren't in the defaults, because the proxies already check them. Setting `hook.sinks` replaces the whole list. Decisions go to the audit log under the name `claude-code` (`hook.server`), so `airlock log` shows them next to the proxies' decisions. The input field names are the ones in Claude Code's hooks reference, and the tests use payloads in that documented format.
+As with MCP sinks, hidden characters anywhere in a checked tool's input also trigger the action. MCP tools (`mcp__server__tool`) aren't in the defaults, because the proxies already check them. Setting `hook.sinks` replaces the whole list. Decisions go to the audit log under the name `claude-code` (`hook.server`), so `airlock log` shows them next to the proxies' decisions. The input field names are the ones in Claude Code's hooks reference. The tests use payloads in that documented format, and a live run in Claude Code 2.1.330 is described under [Quick start](#quick-start).
 
 ## Evaluation
 
@@ -268,7 +274,7 @@ Run `airlock policy <file>` to validate a policy file and print it with defaults
 ## Development
 
 ```sh
-npm test          # 74 tests: hidden text, taint, policy, proxy, Streamable HTTP, CLI, the Claude Code hook, and the full lab
+npm test          # 75 tests: hidden text, taint, policy, proxy, Streamable HTTP, CLI, the Claude Code hook, and the full lab
 npm run typecheck
 ```
 
@@ -281,7 +287,7 @@ The proxy tests connect the SDK's client and server through Airlock in memory. T
 - **Pinning trusts first use.** A tool that is malicious from the start is pinned as-is, unless it carries hidden characters. Read it with `inspect`, or set `pinning.onNew` to `block`. Pinning also can't see a server change what a tool *does* while keeping its definition the same.
 - **Tools only.** Resources, prompts, sampling, and elicitation requests from servers pass through without inspection.
 - **The interruptions are real.** Expect a prompt when you deliberately reuse text from an untrusted source in a sink argument (B3), and after every tool update (B10).
-- **Approval prompts:** In-client prompts, through `elicitation/create` or an `input_required` form, work with the SDK's client. In the Claude desktop app (Claude Code 2.1.330), Claude Code answered the `input_required` form without showing it, so held calls were blocked; see [Quick start](#quick-start) for the setting that avoids this. A form's state lives in the Airlock process, so if Airlock restarts before the answer comes back, the user is asked again. Requiring a terminal for `airlock approve` is a speed bump against an agent with a shell, not a security boundary.
+- **Approval prompts:** In-client prompts, through `elicitation/create` or an `input_required` form, work with the SDK's client. In the Claude desktop app (Claude Code 2.1.330), Claude Code declined the `input_required` form without showing it, so held calls were blocked; see [Quick start](#quick-start) for the setting that avoids this. A form's state lives in the Airlock process, so if Airlock restarts before the answer comes back, the user is asked again. Requiring a terminal for `airlock approve` is a speed bump against an agent with a shell, not a security boundary.
 - **State is plain files.** Taint and audit records are appended to JSONL and are never compacted. Old taint records stop counting after `ttlHours`. The Streamable HTTP upstream is tested against the SDK's handler with a 2025-revision client only.
 
 ## Roadmap

@@ -45,13 +45,19 @@ export function checkSinks(taint: TaintStore, sinks: SinkCheck[], args: unknown,
   const hits: TaintHit[] = [];
   const reasons: string[] = [];
   if (sinks.length === 0) return { action, hits, reasons };
+  // The same text read twice from one tool is one finding: keep the most recent read.
+  const latest = new Map<string, TaintHit>();
   for (const sink of sinks) {
     const found = taint.check(args, sink.checks, ignoreHosts);
-    if (found.length > 0) {
-      hits.push(...found);
-      action = strictest(action, sink.action);
+    if (found.length === 0) continue;
+    action = strictest(action, sink.action);
+    for (const hit of found) {
+      const key = [hit.arg, hit.label, hit.kind, hit.excerpt, hit.via ?? "", hit.source.server, hit.source.tool].join("\u0000");
+      const seen = latest.get(key);
+      if (!seen || hit.source.ts > seen.source.ts) latest.set(key, hit);
     }
   }
+  hits.push(...latest.values());
   const hidden = scanHiddenJson(args);
   if (hidden.length > 0) {
     action = strictest(action, ...sinks.map((s) => s.action));

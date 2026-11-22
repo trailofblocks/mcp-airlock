@@ -103,6 +103,20 @@ describe("hook: decisions", () => {
     assert.deepEqual(readAudit(statePaths(stateDir).audit), []);
   });
 
+  it("reports text read twice from the same tool once, with the latest read", () => {
+    const stateDir = tmp();
+    let now = Date.parse("2026-11-22T18:09:11Z");
+    const store = new TaintStore({ file: statePaths(stateDir).taint, session: "default", minMatch: 20, ttlMs: 86_400_000, maxTextChars: 65536, now: () => now });
+    store.record({ server: "issues", tool: "get_issue", label: "untrusted", indicators: true }, [INJECTION]);
+    now = Date.parse("2026-11-22T19:05:20Z");
+    store.record({ server: "issues", tool: "get_issue", label: "untrusted", indicators: true }, [INJECTION]);
+    const reason = decide(fixture("bash-injected.json"), { stateDir })!.hookSpecificOutput.permissionDecisionReason;
+    assert.equal(reason.match(/repeats text returned by/g)?.length, 1);
+    assert.equal(reason.match(/names host evil\.example/g)?.length, 1);
+    assert.match(reason, /\(untrusted, 19:05:20 UTC\)/);
+    assert.doesNotMatch(reason, /18:09:11/);
+  });
+
   it("only sees taint from the same session", () => {
     const stateDir = tmp();
     seed(stateDir, "other-session");
