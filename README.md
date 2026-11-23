@@ -2,6 +2,17 @@
 
 **A runtime firewall for MCP.** Airlock sits between your MCP client and each MCP server it uses. It pins every tool definition, strips hidden text, and blocks tool calls that carry content from an untrusted source into a sensitive tool. A Claude Code hook applies the same taint checks to Claude Code's built-in tools, such as Bash and WebFetch.
 
+<!-- portfolio-demo-videos -->
+## Watch the demo
+
+Use it when a workplace AI assistant gets access to company tools. The walkthrough has on-screen captions.
+
+![Captioned MCP Airlock walkthrough](docs/demo/how-to.gif)
+
+[Download the narrated walkthrough](docs/demo/how-to.mp4?raw=true) · [Download the narrated overview](docs/demo/overview.mp4?raw=true)
+
+<!-- /portfolio-demo-videos -->
+
 [![CI](https://github.com/trailofblocks/mcp-airlock/actions/workflows/ci.yml/badge.svg)](https://github.com/trailofblocks/mcp-airlock/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
